@@ -18,10 +18,14 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include "can_data.h"
+#include "DHT22.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -33,6 +37,8 @@
 /* USER CODE BEGIN PD */
 //LED
 #define LED_COUNT 16
+//CAN
+#define ROLE_SENDER 1
 
 /* USER CODE END PD */
 
@@ -44,27 +50,63 @@
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc2;
 
+CAN_HandleTypeDef hcan;
+
 TIM_HandleTypeDef htim1;
 DMA_HandleTypeDef hdma_tim1_ch1;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
+/* Definitions for Sensor1Task */
+osThreadId_t Sensor1TaskHandle;
+const osThreadAttr_t Sensor1Task_attributes = {
+  .name = "Sensor1Task",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for Sensor2Task */
+osThreadId_t Sensor2TaskHandle;
+const osThreadAttr_t Sensor2Task_attributes = {
+  .name = "Sensor2Task",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal,
+};
+/* Definitions for CanTxTask */
+osThreadId_t CanTxTaskHandle;
+const osThreadAttr_t CanTxTask_attributes = {
+  .name = "CanTxTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
+/* Definitions for envQueue */
+osMessageQueueId_t envQueueHandle;
+const osMessageQueueAttr_t envQueue_attributes = {
+  .name = "envQueue"
+};
+/* Definitions for eventQueue */
+osMessageQueueId_t eventQueueHandle;
+const osMessageQueueAttr_t eventQueue_attributes = {
+  .name = "eventQueue"
+};
 /* USER CODE BEGIN PV */
-//?ÔøΩÔøΩ?ÔøΩÔøΩ?ÔøΩÔøΩ?ÔøΩÔøΩ?ÔøΩÔøΩ ?ÔøΩÔøΩ?ÔøΩÔøΩÔø??????ÔøΩÔøΩ Ôø??????ÔøΩÔøΩ
-uint8_t mhz19_cmd[9] = {0xFF, 0x01, 0x86, 0x00,
-						0x00, 0x00, 0x00, 0x00, 0x79};
-uint8_t mhz19_rx[9];
-uint16_t co2_ppm = 0;
+//?ÔøΩÔøΩ?ÔøΩÔøΩ?ÔøΩÔøΩ?ÔøΩÔøΩ?ÔøΩÔøΩ ?ÔøΩÔøΩ?ÔøΩÔøΩÔøΩ????????????ÔøΩÔøΩ ÔøΩ????????????ÔøΩÔøΩ
 
-// ?ÔøΩÔøΩ?ÔøΩÔøΩ?ÔøΩÔøΩ?ÔøΩÔøΩ ?ÔøΩÔøΩ?ÔøΩÔøΩ Ôø??????ÔøΩÔøΩ
-uint32_t soil_value = 0;
+
+
+
 
 // LED
 
 uint8_t led_data[LED_COUNT][3];
 uint16_t pwm_data[(24 * LED_COUNT) + 50];
 uint8_t datasentflag = 0;
+
+//CAN
+CAN_TxHeaderTypeDef TxHeader;
+uint8_t TxData[8];
+uint32_t TxMailbox;
+
 
 /* USER CODE END PV */
 
@@ -76,13 +118,55 @@ static void MX_USART2_UART_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_TIM1_Init(void);
+static void MX_CAN_Init(void);
+void StartSensor1Task(void *argument);
+void StartSensor2Task(void *argument);
+void StartCanTxTask(void *argument);
+
 /* USER CODE BEGIN PFP */
 void WS2812_SetLED(uint8_t led, uint8_t red, uint8_t green, uint8_t blue);
 void WS2812_Send(void);
+
+
+
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+uint16_t Soil_Read(void)
+{
+		uint16_t soil_value = 0;
+
+		HAL_ADC_Start(&hadc2);
+
+		if (HAL_ADC_PollForConversion(&hadc2, 100) == HAL_OK)
+		{
+			soil_value = HAL_ADC_GetValue(&hadc2);
+		}
+
+		 HAL_ADC_Stop(&hadc2);
+
+		 return soil_value;
+}
+uint16_t MHZ19_ReadCO2(void)
+{
+    uint8_t cmd[9] = {0xFF,0x01,0x86,0x00,0x00,0x00,0x00,0x00,0x79};
+    uint8_t rx[9] = {0};
+    uint16_t co2 = 0;
+
+    HAL_UART_Transmit(&huart1, cmd, 9, 1000);
+
+    if(HAL_UART_Receive(&huart1, rx, 9, 1000) == HAL_OK)
+    {
+        if(rx[0] == 0xFF && rx[1] == 0x86)
+        {
+            co2 = (rx[2] << 8) | rx[3];
+        }
+    }
+
+    return co2;
+}
 
 /* USER CODE END 0 */
 
@@ -119,92 +203,63 @@ int main(void)
   MX_USART1_UART_Init();
   MX_ADC2_Init();
   MX_TIM1_Init();
+  MX_CAN_Init();
   /* USER CODE BEGIN 2 */
-
+  HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
+  HAL_CAN_Start(&hcan);
   /* USER CODE END 2 */
 
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* Create the queue(s) */
+  /* creation of envQueue */
+  envQueueHandle = osMessageQueueNew (5, 8, &envQueue_attributes);
+
+  /* creation of eventQueue */
+  eventQueueHandle = osMessageQueueNew (5, 8, &eventQueue_attributes);
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of Sensor1Task */
+  Sensor1TaskHandle = osThreadNew(StartSensor1Task, NULL, &Sensor1Task_attributes);
+
+  /* creation of Sensor2Task */
+  Sensor2TaskHandle = osThreadNew(StartSensor2Task, NULL, &Sensor2Task_attributes);
+
+  /* creation of CanTxTask */
+  CanTxTaskHandle = osThreadNew(StartCanTxTask, NULL, &CanTxTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+  /* We should never get here as control is now taken by the scheduler */
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
-//	  if (HAL_GPIO_ReadPin(FLAME_SENSOR_GPIO_Port, FLAME_SENSOR_Pin) == GPIO_PIN_RESET)
-//	     {
-//	         printf("Flame Detected\r\n");
-//	     }
-//	     else
-//	     {
-//	         printf("Normal\r\n");
-//	     }
-//
-//	     HAL_Delay(300);
-
-	  // CO2
-	  /*HAL_UART_Transmit(&huart1, mhz19_cmd, 9, 1000);
-
-	  if (HAL_UART_Receive(&huart1, mhz19_rx, 9, 1000) == HAL_OK)
-	  {
-	      if (mhz19_rx[0] == 0xFF && mhz19_rx[1] == 0x86)
-	      {
-	          co2_ppm = (mhz19_rx[2] << 8) | mhz19_rx[3];
-
-	          printf("CO2: %d ppm\r\n", co2_ppm);
-	      }
-	      else
-	      {
-	          printf("MH-Z19 response error\r\n");
-	      }
-	  }
-	  else
-	  {
-	      printf("MH-Z19 receive timeout\r\n");
-	  }
-
-	  HAL_Delay(5000);
-  }*/
-
-	  // SOIL
-//	  HAL_ADC_Start(&hadc2);
-//
-//	  if (HAL_ADC_PollForConversion(&hadc2, 100) == HAL_OK)
-//	  {
-//	      soil_value = HAL_ADC_GetValue(&hadc2);
-//	      printf("Soil ADC Value: %lu\r\n", soil_value);
-//	  }
-//
-//	  HAL_ADC_Stop(&hadc2);
-//
-//	  HAL_Delay(500);
-
-	  // BUZZER
-//	    HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_SET);
-//
-//	    HAL_Delay(500);
-//
-//	    HAL_GPIO_WritePin(BUZZER_GPIO_Port, BUZZER_Pin, GPIO_PIN_RESET);
-//
-//	    HAL_Delay(500);
-
-	  // LED
-
-	    // ?†ÑÏ≤? LED Îπ®Í∞Ñ?Éâ ON
-	    for (int i = 0; i < LED_COUNT; i++)
-	    {
-	        WS2812_SetLED(i, 255, 0, 0);
-	    }
-	    WS2812_Send();
-	    HAL_Delay(1000);
-
-	    // ?†ÑÏ≤? LED OFF
-	    for (int i = 0; i < LED_COUNT; i++)
-	    {
-	        WS2812_SetLED(i, 0, 0, 0);
-	    }
-	    WS2812_Send();
-	    HAL_Delay(1000);
-
 
 
   }
@@ -304,9 +359,9 @@ static void MX_ADC2_Init(void)
 
   /** Configure Regular Channel
   */
-  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Channel = ADC_CHANNEL_2;
   sConfig.Rank = ADC_REGULAR_RANK_1;
-  sConfig.SingleDiff = ADC_DIFFERENTIAL_ENDED;
+  sConfig.SingleDiff = ADC_SINGLE_ENDED;
   sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
   sConfig.OffsetNumber = ADC_OFFSET_NONE;
   sConfig.Offset = 0;
@@ -317,6 +372,43 @@ static void MX_ADC2_Init(void)
   /* USER CODE BEGIN ADC2_Init 2 */
 
   /* USER CODE END ADC2_Init 2 */
+
+}
+
+/**
+  * @brief CAN Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_CAN_Init(void)
+{
+
+  /* USER CODE BEGIN CAN_Init 0 */
+
+  /* USER CODE END CAN_Init 0 */
+
+  /* USER CODE BEGIN CAN_Init 1 */
+
+  /* USER CODE END CAN_Init 1 */
+  hcan.Instance = CAN;
+  hcan.Init.Prescaler = 4;
+  hcan.Init.Mode = CAN_MODE_NORMAL;
+  hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
+  hcan.Init.TimeSeg1 = CAN_BS1_13TQ;
+  hcan.Init.TimeSeg2 = CAN_BS2_4TQ;
+  hcan.Init.TimeTriggeredMode = DISABLE;
+  hcan.Init.AutoBusOff = DISABLE;
+  hcan.Init.AutoWakeUp = DISABLE;
+  hcan.Init.AutoRetransmission = DISABLE;
+  hcan.Init.ReceiveFifoLocked = DISABLE;
+  hcan.Init.TransmitFifoPriority = DISABLE;
+  if (HAL_CAN_Init(&hcan) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN CAN_Init 2 */
+
+  /* USER CODE END CAN_Init 2 */
 
 }
 
@@ -481,7 +573,7 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA1_Channel2_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
 
 }
@@ -504,7 +596,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, TEMP_SENSOR_Pin|BUZZER_Pin|FAN_RELAY_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(TEMP_SENSOR_GPIO_Port, TEMP_SENSOR_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
@@ -518,12 +610,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : TEMP_SENSOR_Pin BUZZER_Pin FAN_RELAY_Pin */
-  GPIO_InitStruct.Pin = TEMP_SENSOR_Pin|BUZZER_Pin|FAN_RELAY_Pin;
+  /*Configure GPIO pin : TEMP_SENSOR_Pin */
+  GPIO_InitStruct.Pin = TEMP_SENSOR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+  HAL_GPIO_Init(TEMP_SENSOR_GPIO_Port, &GPIO_InitStruct);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
@@ -580,9 +672,175 @@ void WS2812_Send(void)
     while (!datasentflag);
 }
 
+void CAN_Send_Env(ENV_DATA_t *env)
+{
+    TxHeader.StdId = CAN_ID_ENV;
+    TxHeader.ExtId = 0x00;
+    TxHeader.IDE = CAN_ID_STD;
+    TxHeader.RTR = CAN_RTR_DATA;
+    TxHeader.DLC = 8;
+    TxHeader.TransmitGlobalTime = DISABLE;
+
+    TxData[0] = env->temp;
+    TxData[1] = env->humi;
+    TxData[2] = env->co2 >> 8;
+    TxData[3] = env->co2 & 0xFF;
+    TxData[4] = env->soil >> 8;
+    TxData[5] = env->soil & 0xFF;
+    TxData[6] = 0;
+    TxData[7] = 0;
+
+    HAL_CAN_AddTxMessage(&hcan, &TxHeader, TxData, &TxMailbox);
+}
+
+void CAN_Send_Event(EVENT_DATA_t *event)
+{
+    TxHeader.StdId = CAN_ID_EVENT;
+    TxHeader.ExtId = 0x00;
+    TxHeader.IDE = CAN_ID_STD;
+    TxHeader.RTR = CAN_RTR_DATA;
+    TxHeader.DLC = 8;
+    TxHeader.TransmitGlobalTime = DISABLE;
+
+    TxData[0] = event->pir;
+    TxData[1] = event->flame;
+    TxData[2] = 0;
+    TxData[3] = 0;
+    TxData[4] = 0;
+    TxData[5] = 0;
+    TxData[6] = 0;
+    TxData[7] = 0;
+
+    HAL_CAN_AddTxMessage(&hcan, &TxHeader, TxData, &TxMailbox);
+}
 
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartSensor1Task */
+/**
+  * @brief  Function implementing the Sensor1Task thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartSensor1Task */
+void StartSensor1Task(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+    ENV_DATA_t env;
+    DHT22_Data_t dht;
+
+    DHT22_Init(TEMP_SENSOR_GPIO_Port, TEMP_SENSOR_Pin);
+    uint8_t dht_result;
+    osDelay(2000);   // sensor ?ÔøΩÔøΩ?ÔøΩÔøΩ?ÔøΩÔøΩ
+  /* Infinite loop */
+  for(;;)
+  {
+
+      // DHT22
+	  osKernelLock();
+	  dht_result = DHT22_ReadData(&dht);
+	  osKernelUnlock();
+
+      if (dht_result == DHT22_OK)
+      {
+          env.temp = (uint8_t)dht.temperature;
+          env.humi = (uint8_t)dht.humidity;
+      }
+      else
+      {
+          env.temp = 0;
+          env.humi = 0;
+      }
+
+	    // MH-Z19
+	    env.co2 = MHZ19_ReadCO2();
+	    // Soil ADC
+	    env.soil = Soil_Read();
+
+
+
+
+	    // 4. Queue ?ÔøΩÔøΩ?ÔøΩÔøΩ`
+	    osMessageQueuePut(envQueueHandle, &env, 0, 0);
+
+	    osDelay(5000);
+  }
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartSensor2Task */
+/**
+* @brief Function implementing the Sensor2Task thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartSensor2Task */
+void StartSensor2Task(void *argument)
+{
+  /* USER CODE BEGIN StartSensor2Task */
+  /* Infinite loop */
+	EVENT_DATA_t event;
+
+	  uint8_t pir_now = 0;
+	  uint8_t flame_now = 0;
+	  uint32_t pirHoldUntil = 0;
+
+
+	  for(;;)
+	  {
+	      pir_now = HAL_GPIO_ReadPin(PIR_SENSOR_GPIO_Port, PIR_SENSOR_Pin);
+
+	      // Flame ÏÑºÏÑúÎäî Î≥¥ÌÜµ Í∞êÏßÄ Ïãú LOWÎùºÏÑú Î∞òÏ†Ñ
+	      flame_now = !HAL_GPIO_ReadPin(FLAME_SENSOR_GPIO_Port, FLAME_SENSOR_Pin);
+
+	      if(pir_now == 1)
+	      {
+	          pirHoldUntil = HAL_GetTick() + 5000;
+	      }
+
+	      event.pir = (HAL_GetTick() < pirHoldUntil) ? 1 : 0;
+	      event.flame = flame_now;
+
+	      osMessageQueuePut(eventQueueHandle, &event, 0, 0);
+
+	      printf("[EVENT] PIR:%d FLAME:%d\r\n", event.pir, event.flame);
+
+	      osDelay(100);
+	  }
+  /* USER CODE END StartSensor2Task */
+}
+
+/* USER CODE BEGIN Header_StartCanTxTask */
+/**
+* @brief Function implementing the CanTxTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartCanTxTask */
+void StartCanTxTask(void *argument)
+{
+  /* USER CODE BEGIN StartCanTxTask */
+  /* Infinite loop */
+	  ENV_DATA_t env;
+	  EVENT_DATA_t event;
+	  for(;;)
+	  {
+	    if(osMessageQueueGet(envQueueHandle, &env, NULL, 0) == osOK)
+	    {
+			CAN_Send_Env(&env);
+	    }
+	    if(osMessageQueueGet(eventQueueHandle, &event, NULL, 0) == osOK)
+	    {
+	      CAN_Send_Event(&event);
+	    }
+
+	    osDelay(1);
+
+	  }
+
+  /* USER CODE END StartCanTxTask */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.

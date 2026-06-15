@@ -73,10 +73,6 @@ void Error_Handler(void);
 #define SOIL_SENSOR_GPIO_Port GPIOA
 #define TEMP_SENSOR_Pin GPIO_PIN_0
 #define TEMP_SENSOR_GPIO_Port GPIOB
-#define BUZZER_Pin GPIO_PIN_1
-#define BUZZER_GPIO_Port GPIOB
-#define FAN_RELAY_Pin GPIO_PIN_10
-#define FAN_RELAY_GPIO_Port GPIOB
 #define TMS_Pin GPIO_PIN_13
 #define TMS_GPIO_Port GPIOA
 #define TCK_Pin GPIO_PIN_14
